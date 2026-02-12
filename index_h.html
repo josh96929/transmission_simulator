@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
+  <title>Transmission Simulator</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 16px; background:#fafafa; }
+
+    .row { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+
+    /* Dash panels are not inside a white card */
+    .dashWrap { display:flex; gap:16px; flex-wrap:wrap; align-items:flex-start; }
+
+    /* Keep a consistent left edge alignment target */
+    .alignLeft { margin-left: 12px; }
+
+    canvas { display:block; }
+
+    .card { border:1px solid #ddd; border-radius:12px; padding:12px; background:#fff; }
+    label { display:block; margin: 8px 0 2px; font-size: 12px; color:#333; }
+    input[type="range"] { width: 260px; }
+    input[type="number"] { width: 90px; padding: 4px 6px; font-family: Arial; }
+    .grid3 { display:grid; grid-template-columns: 1fr 1fr 1fr; gap:10px 12px; align-items:center; }
+    button { padding:8px 12px; border-radius:10px; border:1px solid #aaa; background:#f7f7f7; cursor:pointer; font-family: Arial; }
+    button:active { transform: translateY(1px); }
+    .small { font-size: 12px; color:#444; font-family: Arial; }
+    .btnRow { display:flex; gap:10px; flex-wrap:wrap; margin-top:10px; }
+
+    /* Settings accordion (default closed) */
+    details { border:1px solid #ddd; border-radius:12px; padding:10px 12px; background:#fff; }
+    summary { cursor:pointer; font-weight:700; font-size: 14px; outline:none; }
+    summary::-webkit-details-marker { display:none; }
+    .settingsInner { margin-top:10px; }
+    .hint { margin-top:8px; line-height: 1.35; }
+    .settingsGap { margin-top:14px; }
+
+    /* Plot cards: keep them aligned with dash by applying .alignLeft */
+    .plotCard { width: 884px; }
+    .plotTitle { text-align:center; }
+  </style>
+</head>
+<body>
+  <h2>Transmission Simulator: RPM vs Time, RPM vs Vehicle Speed, Shifting Gears Simulation</h2>
+
+  <div class="row">
+    <!-- CLEANEST FIX: no white card around the dash, just aligned left -->
+    <div class="dashWrap alignLeft">
+      <canvas id="gauges" width="820" height="420"></canvas>
+      <canvas id="controlsDash" width="240" height="420"></canvas>
+    </div>
+
+    <div class="card" style="min-width: 320px;">
+      <div class="btnRow">
+        <button id="start">Start</button>
+        <button id="stop">Stop</button>
+        <button id="reset">Reset</button>
+      </div>
+
+      <div class="settingsGap"></div>
+
+      <details id="settings">
+        <summary>Settings</summary>
+        <div class="settingsInner">
+          <label>Driver throttle input</label>
+          <input id="throttleIn" type="range" min="0" max="1" step="0.01" value="0.70"/>
+          <div class="small" id="throttleLabel"></div>
+
+          <label>Auto shift</label>
+          <input id="auto" type="checkbox" checked/>
+
+          <label>Upshift RPM</label>
+          <input id="upshift" type="range" min="1500" max="7000" step="50" value="4500"/>
+          <div class="small" id="upshiftLabel"></div>
+
+          <label>Downshift RPM</label>
+          <input id="downshift" type="range" min="800" max="4500" step="50" value="1400"/>
+          <div class="small" id="downshiftLabel"></div>
+
+          <label>Shift time (s)</label>
+          <input id="shiftTime" type="range" min="0.08" max="0.70" step="0.01" value="0.22"/>
+          <div class="small" id="shiftTimeLabel"></div>
+
+          <label>Total run time (s)</label>
+          <input id="runTime" type="number" min="5" max="600" step="1" value="120"/>
+
+          <label>Simulation speed (x)</label>
+          <input id="simRate" type="number" min="0.1" max="50" step="0.1" value="1.0"/>
+          <div class="small hint">
+            Example: set speed to 5.0 to finish a 120 s run in about 24 s of real time.
+          </div>
+
+          <div style="margin-top:12px">
+            <div class="small"><b>Gear ratios</b></div>
+            <div class="grid3 small">
+              <div>1</div><input id="g1" type="number" step="0.01" value="3.60"/><div>:1</div>
+              <div>2</div><input id="g2" type="number" step="0.01" value="2.19"/><div>:1</div>
+              <div>3</div><input id="g3" type="number" step="0.01" value="1.41"/><div>:1</div>
+              <div>4</div><input id="g4" type="number" step="0.01" value="1.00"/><div>:1</div>
+              <div>5</div><input id="g5" type="number" step="0.01" value="0.83"/><div>:1</div>
+              <div>6</div><input id="g6" type="number" step="0.01" value="0.72"/><div>:1</div>
+              <div>FD</div><input id="fd" type="number" step="0.01" value="3.90"/><div>:1</div>
+            </div>
+          </div>
+        </div>
+      </details>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:16px">
+    <div class="card plotCard alignLeft">
+      <div class="small plotTitle"><b>RPM vs time</b></div>
+      <canvas id="plotTime" width="860" height="280"></canvas>
+    </div>
+  </div>
+
+  <div class="row" style="margin-top:16px">
+    <div class="card plotCard alignLeft">
+      <div class="small plotTitle"><b>RPM vs vehicle speed</b></div>
+      <canvas id="plotSpeed" width="860" height="280"></canvas>
+    </div>
+  </div>
+
+<script>
+(() => {
+  // ----------------- Config -----------------
+  let gears = [0, 3.60, 2.19, 1.41, 1.00, 0.83, 0.72];
+  let finalDrive = 3.90;
+
+  const redline = 6500;
+  const idleRPM = 750;
+
+  const tireRadiusM = 0.315;
+  const vehicleMassKg = 1700;
+
+  // toy road load
+  const dragCoef = 0.32;
+  const rollingN = 90;
+
+  const maxWheelForce = 4200;
+  const speedMaxMph = 120;
+
+  // ----------------- UI -----------------
+  const elThrottleIn = document.getElementById('throttleIn');
+  const elAuto = document.getElementById('auto');
+  const elUpshift = document.getElementById('upshift');
+  const elDownshift = document.getElementById('downshift');
+  const elShiftTime = document.getElementById('shiftTime');
+  const elRunTime = document.getElementById('runTime');
+  const elSimRate = document.getElementById('simRate');
+
+  const throttleLabel = document.getElementById('throttleLabel');
+  const upshiftLabel = document.getElementById('upshiftLabel');
+  const downshiftLabel = document.getElementById('downshiftLabel');
+  const shiftTimeLabel = document.getElementById('shiftTimeLabel');
+
+  const gearInputs = {
+    g1: document.getElementById('g1'),
+    g2: document.getElementById('g2'),
+    g3: document.getElementById('g3'),
+    g4: document.getElementById('g4'),
+    g5: document.getElementById('g5'),
+    g6: document.getElementById('g6'),
+    fd: document.getElementById('fd')
+  };
+
+  // Start / stop / reset
+  let running = false;
+  document.getElementById('start').onclick = () => { running = true; };
+  document.getElementById('stop').onclick  = () => { running = false; };
+  document.getElementById('reset').onclick = () => { reset(); };
+
+  // ----------------- Helpers -----------------
+  function clamp(x,a,b){ return Math.max(a, Math.min(b,x)); }
+  function mph(ms){ return ms * 2.2369362921; }
+
+  function sanitizePositiveNumber(el, fallback){
+    let v = parseFloat(el.value);
+    if (!Number.isFinite(v) || v <= 0) v = fallback;
+    el.value = v.toFixed(2);
+    return v;
+  }
+
+  function updateRatiosFromUI(){
+    const g1 = sanitizePositiveNumber(gearInputs.g1, 3.60);
+    const g2 = sanitizePositiveNumber(gearInputs.g2, 2.19);
+    const g3 = sanitizePositiveNumber(gearInputs.g3, 1.41);
+    const g4 = sanitizePositiveNumber(gearInputs.g4, 1.00);
+    const g5 = sanitizePositiveNumber(gearInputs.g5, 0.83);
+    const g6 = sanitizePositiveNumber(gearInputs.g6, 0.72);
+    const fd = sanitizePositiveNumber(gearInputs.fd, 3.90);
+
+    gears = [0, g1, g2, g3, g4, g5, g6];
+    finalDrive = fd;
+  }
+  Object.values(gearInputs).forEach(el => {
+    el.addEventListener('change', updateRatiosFromUI);
+    el.addEventListener('blur', updateRatiosFromUI);
+  });
+  updateRatiosFromUI();
+
+  function ratioForGear(g){
+    return gears[g] * finalDrive;
+  }
+
+  function speedToRPM(speedMs, ratio){
+    const wheelRps = speedMs / (2 * Math.PI * tireRadiusM);
+    const wheelRpm = wheelRps * 60;
+    return wheelRpm * ratio;
+  }
+
+  function wheelForceFromThrottle(throttle, gear, rpm){
+    const gearFactor = (gears[gear] / gears[1]);
+    const rpmFactor = 0.6 + 0.4 * (1 - Math.abs((rpm - 3200) / 4200));
+    return maxWheelForce * throttle * clamp(gearFactor, 0.25, 1.0) * clamp(rpmFactor, 0.4, 1.0);
+  }
+
+  // ----------------- State -----------------
+  let t = 0;
+  let v = 0;
+  let rpm = idleRPM;
+  let gear = 1;
+
+  let shifting = false;
+  let shiftTimer = 0;
+  let shiftTotal = 0;
+
+  let clutch = 0;
+  let throttleEff = 0;
+  let brake = 0;
+
+  const timeSeries = [];
+  const speedSeries = [];
+  const shiftMarksTime = [];
+  const shiftMarksSpeed = [];
+
+  // ----------------- Shift logic -----------------
+  function beginShift(nextGear){
+    shifting = true;
+    shiftTotal = parseFloat(elShiftTime.value);
+    shiftTimer = shiftTotal;
+
+    const vMph = mph(v);
+    shiftMarksTime.push({ x: t, y: rpm, label: `gear ${nextGear}` });
+    shiftMarksSpeed.push({ x: vMph, y: rpm, label: `gear ${nextGear}` });
+
+    gear = nextGear;
+  }
+
+  function updatePedals(driverThrottle, dt){
+    if (!shifting) {
+      clutch += (0 - clutch) * (1 - Math.exp(-dt / 0.08));
+      throttleEff += (driverThrottle - throttleEff) * (1 - Math.exp(-dt / 0.12));
+      brake += (0 - brake) * (1 - Math.exp(-dt / 0.10));
+      return;
+    }
+
+    const progress = clamp(1 - shiftTimer / shiftTotal, 0, 1);
+
+    const upEnd = 0.22;
+    const downStart = 0.72;
+
+    let clutchTarget = 0;
+    if (progress < upEnd) clutchTarget = progress / upEnd;
+    else if (progress < downStart) clutchTarget = 1;
+    else clutchTarget = 1 - (progress - downStart) / (1 - downStart);
+
+    let throttleTarget = 0.02;
+    if (progress > 0.75) {
+      const back = (progress - 0.75) / 0.25;
+      throttleTarget = 0.02 + back * (driverThrottle - 0.02);
+    }
+
+    clutch += (clutchTarget - clutch) * (1 - Math.exp(-dt / 0.05));
+    throttleEff += (throttleTarget - throttleEff) * (1 - Math.exp(-dt / 0.05));
+    brake += (0 - brake) * (1 - Math.exp(-dt / 0.05));
+  }
+
+  // ----------------- Physics update -----------------
+  function update(dt){
+    const runDurationS = clamp(parseFloat(elRunTime.value) || 120, 5, 600);
+    const simRate = clamp(parseFloat(elSimRate.value) || 1, 0.1, 50);
+
+    dt *= simRate;
+    if (t >= runDurationS) { running = false; return; }
+
+    updateRatiosFromUI();
+
+    const driverThrottle = parseFloat(elThrottleIn.value);
+    const upshiftRPM = parseFloat(elUpshift.value);
+    const downshiftRPM = parseFloat(elDownshift.value);
+
+    if (elAuto.checked && !shifting) {
+      if (rpm > upshiftRPM && gear < gears.length - 1) beginShift(gear + 1);
+      else if (rpm < downshiftRPM && gear > 1) beginShift(gear - 1);
+    }
+
+    updatePedals(driverThrottle, dt);
+
+    const clutchEngaged = (clutch < 0.15);
+    const clutchFactor = clutchEngaged ? 1.0 : 0.18;
+
+    const coupledRPM = speedToRPM(v, ratioForGear(gear));
+
+    if (shifting) {
+      shiftTimer -= dt;
+      const target = clamp(coupledRPM, idleRPM, redline);
+      rpm += (target - rpm) * (1 - Math.exp(-dt / 0.07));
+      if (shiftTimer <= 0) shifting = false;
+    } else {
+      const lead = 120 + 380 * throttleEff;
+      const target = clamp(coupledRPM + lead, idleRPM, redline);
+      rpm += (target - rpm) * (1 - Math.exp(-dt / 0.12));
+    }
+
+    const driveForce = wheelForceFromThrottle(throttleEff, gear, rpm) * clutchFactor;
+    const dragForce = dragCoef * v * v + rollingN;
+    const brakeForce = 5200 * brake;
+    const a = (driveForce - dragForce - brakeForce) / vehicleMassKg;
+    v = Math.max(0, v + a * dt);
+
+    if (v < 0.4 && driverThrottle < 0.03 && !shifting) {
+      rpm += (idleRPM - rpm) * (1 - Math.exp(-dt / 0.2));
+    }
+
+    t = Math.min(runDurationS, t + dt);
+
+    const vMph = mph(v);
+    timeSeries.push({x:t, y:rpm});
+    speedSeries.push({x:vMph, y:rpm});
+
+    throttleLabel.textContent = `Driver throttle: ${(driverThrottle*100).toFixed(0)}%`;
+    upshiftLabel.textContent = `Upshift: ${upshiftRPM.toFixed(0)} rpm`;
+    downshiftLabel.textContent = `Downshift: ${downshiftRPM.toFixed(0)} rpm`;
+    shiftTimeLabel.textContent = `Shift time: ${parseFloat(elShiftTime.value).toFixed(2)} s`;
+  }
+
+  // ----------------- Drawing -----------------
+  const gaugesCtx = document.getElementById('gauges').getContext('2d');
+  const controlsCtx = document.getElementById('controlsDash').getContext('2d');
+
+  function roundRectPath(ctx, x, y, w, h, r){
+    const rr = Math.min(r, w/2, h/2);
+    ctx.beginPath();
+    ctx.moveTo(x+rr, y);
+    ctx.arcTo(x+w, y, x+w, y+h, rr);
+    ctx.arcTo(x+w, y+h, x, y+h, rr);
+    ctx.arcTo(x, y+h, x, y, rr);
+    ctx.arcTo(x, y, x+w, y, rr);
+    ctx.closePath();
+  }
+
+  function drawClusterGauge(ctx, cx, cy, radius, value, vmin, vmax, majorStep, minorStep, opts){
+    const {
+      title,
+      unitLabel,
+      faceColor = "#2f2f2f",
+      ringColor = "#dcdcdc",
+      tickColor = "#f0f0f0",
+      textColor = "#f5f5f5",
+      needleColor = "#ff4040",
+      redStartFrac = 0.80,
+      showX1000 = false,
+      digitalText = "",
+      numberFormatter = (x) => String(x),
+      startAngle = Math.PI * 0.75,
+      endAngle = Math.PI * 2.25
+    } = opts;
+
+    function angFor(u){
+      const p = clamp((u - vmin) / (vmax - vmin), 0, 1);
+      return startAngle + (endAngle - startAngle) * p;
+    }
+
+    ctx.save();
+
+    ctx.fillStyle = faceColor;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius + 10, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.lineWidth = 10;
+    ctx.strokeStyle = ringColor;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, startAngle, endAngle);
+    ctx.stroke();
+
+    const redStart = startAngle + (endAngle - startAngle) * redStartFrac;
+    ctx.strokeStyle = "#d32020";
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, redStart, endAngle);
+    ctx.stroke();
+
+    ctx.lineWidth = 2;
+    ctx.strokeStyle = tickColor;
+    for (let u = vmin; u <= vmax + 1e-9; u += minorStep) {
+      const a = angFor(u);
+      const x0 = cx + Math.cos(a) * (radius - 10);
+      const y0 = cy + Math.sin(a) * (radius - 10);
+      const x1 = cx + Math.cos(a) * (radius + 2);
+      const y1 = cy + Math.sin(a) * (radius + 2);
+      ctx.beginPath();
+      ctx.moveTo(x0,y0);
+      ctx.lineTo(x1,y1);
+      ctx.stroke();
+    }
+
+    ctx.lineWidth = 3;
+    ctx.fillStyle = textColor;
+    ctx.font = "16px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+
+    for (let u = vmin; u <= vmax + 1e-9; u += majorStep) {
+      const a = angFor(u);
+      const x0 = cx + Math.cos(a) * (radius - 18);
+      const y0 = cy + Math.sin(a) * (radius - 18);
+      const x1 = cx + Math.cos(a) * (radius + 2);
+      const y1 = cy + Math.sin(a) * (radius + 2);
+      ctx.beginPath();
+      ctx.moveTo(x0,y0);
+      ctx.lineTo(x1,y1);
+      ctx.stroke();
+
+      const tx = cx + Math.cos(a) * (radius - 36);
+      const ty = cy + Math.sin(a) * (radius - 36);
+      ctx.fillText(numberFormatter(u), tx, ty);
+    }
+
+    const aVal = angFor(value);
+    ctx.lineWidth = 4;
+    ctx.strokeStyle = needleColor;
+    ctx.beginPath();
+    ctx.moveTo(cx, cy);
+    ctx.lineTo(cx + Math.cos(aVal) * (radius - 24), cy + Math.sin(aVal) * (radius - 24));
+    ctx.stroke();
+
+    ctx.fillStyle = "#111";
+    ctx.beginPath();
+    ctx.arc(cx, cy, 8, 0, Math.PI*2);
+    ctx.fill();
+
+    ctx.fillStyle = textColor;
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = "14px Arial";
+    ctx.fillText(title, cx, cy + radius - 18);
+    ctx.font = "12px Arial";
+    ctx.fillText(showX1000 ? "x1000 RPM" : unitLabel, cx, cy + radius - 4);
+
+    const boxW = 150, boxH = 34;
+    const bx = cx - boxW/2;
+    const by = cy + radius + 32;
+    ctx.fillStyle = "#101010";
+    ctx.strokeStyle = "#666";
+    ctx.lineWidth = 1;
+    roundRectPath(ctx, bx, by, boxW, boxH, 8);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.fillStyle = "#eaeaea";
+    ctx.font = "18px Arial";
+    ctx.fillText(digitalText, cx, by + boxH/2 + 1);
+
+    ctx.restore();
+  }
+
+  function drawGearLadder(ctx, x, y, w, h, currentGear){
+    ctx.save();
+    ctx.fillStyle = "#0f0f0f";
+    roundRectPath(ctx, x, y, w, h, 18);
+    ctx.fill();
+
+    ctx.fillStyle = "#f2f2f2";
+    ctx.font = "14px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText("GEAR", x + w/2, y + 18);
+
+    const items = ["1","2","3","4","5","6"];
+    const top = y + 36;
+    const rowH = (h - 52) / items.length;
+
+    for (let i=0;i<items.length;i++){
+      const gy = top + i*rowH;
+      const isActive = (parseInt(items[i],10) === currentGear);
+
+      if (isActive){
+        ctx.fillStyle = "#ffffff";
+        roundRectPath(ctx, x + 16, gy + 6, w - 32, rowH - 12, 10);
+        ctx.fill();
+      }
+
+      ctx.fillStyle = isActive ? "#111" : "rgba(255,255,255,0.55)";
+      ctx.font = "16px Arial";
+      ctx.fillText(items[i], x + w/2, gy + rowH/2);
+
+      ctx.strokeStyle = "rgba(255,255,255,0.08)";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(x + 14, gy + rowH);
+      ctx.lineTo(x + w - 14, gy + rowH);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+  }
+
+  function drawPedal(ctx, x, y, w, h, label, pressed01){
+    ctx.save();
+
+    ctx.fillStyle = "rgba(0,0,0,0.12)";
+    roundRectPath(ctx, x+3, y+4, w, h, 16);
+    ctx.fill();
+
+    const g = ctx.createLinearGradient(x, y, x, y+h);
+    g.addColorStop(0, "#3a3a3a");
+    g.addColorStop(1, "#2a2a2a");
+
+    ctx.fillStyle = g;
+    ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.lineWidth = 2;
+    roundRectPath(ctx, x, y, w, h, 16);
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = "rgba(255,255,255,0.15)";
+    ctx.lineWidth = 2;
+    const treadCount = 7;
+    for (let i=0;i<treadCount;i++){
+      const yy = y + 18 + i * ((h - 36) / (treadCount-1));
+      ctx.beginPath();
+      ctx.moveTo(x + 10, yy);
+      ctx.lineTo(x + w - 10, yy);
+      ctx.stroke();
+    }
+
+    if (pressed01 > 0.02){
+      ctx.fillStyle = `rgba(80,255,120,${0.06 + 0.18*pressed01})`;
+      roundRectPath(ctx, x, y, w, h, 16);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "#f2f2f2";
+    ctx.font = "12px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(label, x + w/2, y + h + 6);
+
+    ctx.restore();
+  }
+
+  function drawGaugesPanel(){
+    const ctx = gaugesCtx;
+    ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
+
+    ctx.fillStyle = "#0f0f0f";
+    roundRectPath(ctx, 12, 12, ctx.canvas.width - 24, ctx.canvas.height - 24, 18);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(255,255,255,0.10)";
+    roundRectPath(ctx, (ctx.canvas.width/2) - 80, 20, 160, 28, 10);
+    ctx.fill();
+    ctx.fillStyle = "#f2f2f2";
+    ctx.font = "13px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.fillText(running ? "RUNNING" : "STOPPED", ctx.canvas.width/2, 34);
+
+    const r = 140;
+    const cy = 175;
+    const margin = 36;
+    const leftCx = 12 + (r + 18) + margin;
+    const rightCx = ctx.canvas.width - 12 - (r + 18) - margin;
+
+    const tachVal = rpm / 1000;
+    drawClusterGauge(ctx, leftCx, cy, r,
+      tachVal, 0, 8, 1, 0.2,
+      {
+        title: "TACHOMETER",
+        unitLabel: "",
+        showX1000: true,
+        redStartFrac: 0.79,
+        digitalText: `${rpm.toFixed(0)} RPM`,
+        numberFormatter: (u) => `${u}`,
+        needleColor: "#ff4a4a"
+      }
+    );
+
+    const sp = mph(v);
+    drawClusterGauge(ctx, rightCx, cy, r,
+      sp, 0, 120, 20, 5,
+      {
+        title: "SPEEDOMETER",
+        unitLabel: "mph",
+        showX1000: false,
+        redStartFrac: 0.92,
+        digitalText: `${sp.toFixed(1)} mph`,
+        numberFormatter: (u) => `${u}`,
+        needleColor: "#ff4a4a"
+      }
+    );
+  }
+
+  function drawControlsPanel(){
+    const ctx = controlsCtx;
+    ctx.clearRect(0,0,ctx.canvas.width,ctx.canvas.height);
+
+    ctx.fillStyle = "#0f0f0f";
+    roundRectPath(ctx, 10, 12, ctx.canvas.width - 20, ctx.canvas.height - 24, 18);
+    ctx.fill();
+
+    drawGearLadder(ctx, 20, 18, 200, 240, gear);
+
+    const py = 290;
+    const pw = 62;
+    const ph = 96;
+    const gap = 10;
+    const startX = 18;
+    drawPedal(ctx, startX + 0*(pw+gap), py, pw, ph, "CLUTCH", clamp(clutch,0,1));
+    drawPedal(ctx, startX + 1*(pw+gap), py, pw, ph, "BRAKE", clamp(brake,0,1));
+    drawPedal(ctx, startX + 2*(pw+gap), py, pw, ph, "GAS", clamp(throttleEff,0,1));
+  }
+
+  const pt = document.getElementById('plotTime').getContext('2d');
+  const ps = document.getElementById('plotSpeed').getContext('2d');
+
+  function drawAxisPlot(ctx, series, marks, xlabel, ylabel, xMin, xMax, yMin, yMax, xMajor, xMinorDivs, yMajor, yMinorDivs){
+    const W = ctx.canvas.width, H = ctx.canvas.height;
+    ctx.clearRect(0,0,W,H);
+
+    const L = 90, R = 18, T = 16, B = 64;
+    const w = W - L - R;
+    const h = H - T - B;
+
+    ctx.fillStyle = "#fff";
+    ctx.fillRect(0,0,W,H);
+
+    function X(x){ return L + (x - xMin) * w / (xMax - xMin); }
+    function Y(y){ return T + h - (y - yMin) * h / (yMax - yMin); }
+
+    ctx.strokeStyle = "#cfcfcf";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(L, T, w, h);
+
+    ctx.strokeStyle = "#f0f0f0";
+    ctx.lineWidth = 1;
+    for (let xv = xMin; xv <= xMax + 1e-9; xv += xMajor / xMinorDivs){
+      const xx = X(xv);
+      ctx.beginPath(); ctx.moveTo(xx, T); ctx.lineTo(xx, T+h); ctx.stroke();
+    }
+    for (let yv = yMin; yv <= yMax + 1e-9; yv += yMajor / yMinorDivs){
+      const yy = Y(yv);
+      ctx.beginPath(); ctx.moveTo(L, yy); ctx.lineTo(L+w, yy); ctx.stroke();
+    }
+
+    ctx.strokeStyle = "#e0e0e0";
+    ctx.lineWidth = 1.2;
+    for (let xv = xMin; xv <= xMax + 1e-9; xv += xMajor){
+      const xx = X(xv);
+      ctx.beginPath(); ctx.moveTo(xx, T); ctx.lineTo(xx, T+h); ctx.stroke();
+    }
+    for (let yv = yMin; yv <= yMax + 1e-9; yv += yMajor){
+      const yy = Y(yv);
+      ctx.beginPath(); ctx.moveTo(L, yy); ctx.lineTo(L+w, yy); ctx.stroke();
+    }
+
+    ctx.fillStyle = "#111";
+    ctx.font = "12px Arial";
+
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    for (let xv = xMin; xv <= xMax + 1e-9; xv += xMajor){
+      const xx = X(xv);
+      ctx.strokeStyle = "#999";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(xx, T+h);
+      ctx.lineTo(xx, T+h+6);
+      ctx.stroke();
+
+      const lab = (Math.abs(xv) < 1e-9) ? "0" : String(Math.round(xv*100)/100);
+      ctx.fillText(lab, xx, T+h+10);
+    }
+
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let yv = yMin; yv <= yMax + 1e-9; yv += yMajor){
+      const yy = Y(yv);
+      ctx.strokeStyle = "#999";
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(L-6, yy);
+      ctx.lineTo(L, yy);
+      ctx.stroke();
+      ctx.fillText(String(Math.round(yv)), L-10, yy);
+    }
+
+    ctx.fillStyle = "#111";
+    ctx.font = "14px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    ctx.fillText(xlabel, L + w/2, H - 10);
+
+    ctx.save();
+    ctx.translate(26, T + h/2);
+    ctx.rotate(-Math.PI/2);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText(ylabel, 0, 0);
+    ctx.restore();
+
+    ctx.strokeStyle = "#111";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    let started = false;
+    for (const p of series){
+      if (p.x < xMin || p.x > xMax) continue;
+      const xx = X(p.x);
+      const yy = Y(p.y);
+      if (!started){ ctx.moveTo(xx,yy); started = true; }
+      else ctx.lineTo(xx,yy);
+    }
+    ctx.stroke();
+
+    ctx.fillStyle = "#111";
+    ctx.font = "12px Arial";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "bottom";
+    for (const m of marks){
+      if (m.x < xMin || m.x > xMax) continue;
+      const xx = X(m.x);
+      const yy = Y(m.y);
+      ctx.beginPath();
+      ctx.arc(xx, yy, 3, 0, Math.PI*2);
+      ctx.fill();
+      ctx.fillText(m.label, xx + 6, yy - 6);
+    }
+  }
+
+  function drawPlots(){
+    const runDurationS = clamp(parseFloat(elRunTime.value) || 120, 5, 600);
+
+    drawAxisPlot(pt, timeSeries, shiftMarksTime,
+      "time (s)",
+      "revolutions per minute (RPM)",
+      0, runDurationS, 0, redline,
+      Math.max(5, Math.round(runDurationS/12)), 5,
+      1000, 5
+    );
+
+    drawAxisPlot(ps, speedSeries, shiftMarksSpeed,
+      "vehicle speed (mph)",
+      "revolutions per minute (RPM)",
+      0, speedMaxMph, 0, redline,
+      10, 5, 1000, 5
+    );
+  }
+
+  let last = performance.now();
+  function loop(now){
+    requestAnimationFrame(loop);
+    const dtReal = clamp((now - last) / 1000, 0, 0.05);
+    last = now;
+
+    if (running) update(dtReal);
+
+    drawGaugesPanel();
+    drawControlsPanel();
+    drawPlots();
+  }
+
+  function reset(){
+    updateRatiosFromUI();
+
+    t = 0; v = 0; rpm = idleRPM; gear = 1;
+    shifting = false; shiftTimer = 0; shiftTotal = 0;
+    clutch = 0;
+    brake = 0;
+    throttleEff = parseFloat(elThrottleIn.value);
+
+    timeSeries.length = 0;
+    speedSeries.length = 0;
+    shiftMarksTime.length = 0;
+    shiftMarksSpeed.length = 0;
+
+    shiftMarksTime.push({ x: 0, y: idleRPM, label: "gear 1" });
+    shiftMarksSpeed.push({ x: 0, y: idleRPM, label: "gear 1" });
+
+    running = false;
+  }
+
+  function refreshLabels(){
+    const driverThrottle = parseFloat(elThrottleIn.value);
+    const upshiftRPM = parseFloat(elUpshift.value);
+    const downshiftRPM = parseFloat(elDownshift.value);
+
+    throttleLabel.textContent = `Driver throttle: ${(driverThrottle*100).toFixed(0)}%`;
+    upshiftLabel.textContent = `Upshift: ${upshiftRPM.toFixed(0)} rpm`;
+    downshiftLabel.textContent = `Downshift: ${downshiftRPM.toFixed(0)} rpm`;
+    shiftTimeLabel.textContent = `Shift time: ${parseFloat(elShiftTime.value).toFixed(2)} s`;
+  }
+
+  elThrottleIn.addEventListener('input', refreshLabels);
+  elUpshift.addEventListener('input', refreshLabels);
+  elDownshift.addEventListener('input', refreshLabels);
+  elShiftTime.addEventListener('input', refreshLabels);
+  refreshLabels();
+
+  reset();
+  requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
